@@ -59,11 +59,16 @@ jobs:
           mkdir -p $HOME/bin
           for T in x86_64-linux-musl aarch64-linux-musl; do
             BASE=$(echo $T | sed 's/-linux-musl//')
-            printf '#!/bin/sh\nargs=""\nfor a in "$@"; do case "$a" in --target=*) continue;; esac; args="$args \"$a\""; done\nexec python3 -m ziglang cc -target %s $args\n' "$T" > $HOME/bin/${BASE}-unknown-linux-musl-cc
+            cat > $HOME/bin/${BASE}-unknown-linux-musl-cc <<WEOF
+#!/bin/sh
+args=""
+for a in "$@"; do
+  case "$a" in --target=*) ;; *) args="$args '$a'";; esac
+done
+exec python3 -m ziglang cc -target $T $args
+WEOF
             chmod +x $HOME/bin/${BASE}-unknown-linux-musl-cc
-          done
-          echo "$HOME/bin" >> $GITHUB_PATH
-      - name: Install Android NDK + linux-headers
+          doneheaders
         if: matrix.ndk
         uses: nttld/setup-ndk@v1
         id: ndk
@@ -108,8 +113,8 @@ jobs:
           CC_armv7_linux_androideabi: arm-linux-androideabi-clang
           AR_aarch64_linux_android: llvm-ar
           AR_armv7_linux_androideabi: llvm-ar
-          CFLAGS_aarch64_linux_android: --sysroot=${{ env.NDKSYS }} -isystem ${{ env.LINH }}/include -isystem ${{ env.LINH }}/arch/arm64/include/uapi -isystem ${{ env.LINH }}/include/uapi -DHAVE_LINUX_MAGIC_H
-          CFLAGS_armv7_linux_androideabi: --sysroot=${{ env.NDKSYS }} -isystem ${{ env.LINH }}/include -isystem ${{ env.LINH }}/arch/arm/include/uapi -isystem ${{ env.LINH }}/include/uapi -DHAVE_LINUX_MAGIC_H
+          CFLAGS_aarch64_linux_android: --sysroot=${{ env.NDKSYS }} -isystem ${{ env.LINH }}/include/uapi -isystem ${{ env.LINH }}/arch/arm64/include/uapi -isystem ${{ env.LINH }}/arch/arm64/include/generated/uapi -DHAVE_LINUX_MAGIC_H
+          CFLAGS_armv7_linux_androideabi: --sysroot=${{ env.NDKSYS }} -isystem ${{ env.LINH }}/include/uapi -isystem ${{ env.LINH }}/arch/arm/include/uapi -isystem ${{ env.LINH }}/arch/arm/include/generated/uapi -DHAVE_LINUX_MAGIC_H
           LDFLAGS_aarch64_linux_android: --sysroot=${{ env.NDKSYS }}
           LDFLAGS_armv7_linux_androideabi: --sysroot=${{ env.NDKSYS }}
           # musl builds compile vendored libusb; needs linux headers on include path
