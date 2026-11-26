@@ -118,7 +118,8 @@ impl<'a> Firehose<'a> {
         connectcmd += "/></data>";
         let rsp = self.xmlsend(connectcmd.as_bytes(), false);
         if !rsp.resp {
-            // Re-send once: many loaders answer the first configure with a NAK carrying params.
+            // The first configure is often NAKed with the target's real limits
+            // (python does the same): adopt them and re-send a REBUILT command.
             if let Some(v) = attr(&rsp.attrs, "MaxPayloadSizeToTargetInBytes") {
                 if let Ok(n) = v.parse() {
                     self.cfg.max_payload_size_to_target = n;
@@ -127,7 +128,20 @@ impl<'a> Firehose<'a> {
             if let Some(v) = attr(&rsp.attrs, "MemoryName") {
                 self.cfg.memory_name = v.to_string();
             }
-            let rsp2 = self.xmlsend(connectcmd.as_bytes(), false);
+            // Rebuild the configure XML with the adopted values.
+            let mut connectcmd2 = format!(
+                "<?xml version=\"1.0\" encoding=\"UTF-8\" ?><data><configure MemoryName=\"{}\" Verbose=\"0\"  AlwaysValidate=\"0\" MaxDigestTableSizeInBytes=\"2048\"  MaxPayloadSizeToTargetInBytes=\"{}\" ZLPAwareHost=\"{}\"  SkipStorageInit=\"{}\" SkipWrite=\"{}\"",
+                self.cfg.memory_name,
+                self.cfg.max_payload_size_to_target,
+                self.cfg.zlp_aware_host,
+                self.cfg.skip_storage_init as u8,
+                self.cfg.skip_write as u8,
+            );
+            if self.cfg.memory_name.eq_ignore_ascii_case("nand") && self.cfg.pages_per_block != 0 {
+                connectcmd2 += &format!(" PAGES_PER_BLOCK=\"{}\"", self.cfg.pages_per_block);
+            }
+            connectcmd2 += "/></data>";
+            let rsp2 = self.xmlsend(connectcmd2.as_bytes(), false);
             if !rsp2.resp {
                 return Err(anyhow!("configure failed: {}", rsp2.error));
             }
