@@ -60,7 +60,7 @@ jobs:
           mkdir -p wrappers
           for T in x86_64-linux-musl aarch64-linux-musl; do
             BASE=$(echo $T | sed 's/-linux-musl//')
-            printf '#!/bin/sh\nargs=""\nfor a in "$@"; do\n  case "$a" in --target=*) ;; *) args="$args $a";; esac\ndone\nexec python3 -m ziglang cc -target %s $args\n' "$T" > wrappers/${BASE}-unknown-linux-musl-cc
+            printf '#!/usr/bin/env python3\nimport os, sys\nargv = [a for a in sys.argv[1:] if not a.startswith("--target=")]\nos.execvp("python3", ["python3", "-m", "ziglang", "cc", "-target", "%s"] + argv)\n' "$T" > wrappers/${BASE}-unknown-linux-musl-cc
             chmod +x wrappers/${BASE}-unknown-linux-musl-cc
           done
           echo "WRAPPER_DIR=$PWD/wrappers" >> $GITHUB_ENV
