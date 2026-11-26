@@ -46,8 +46,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-      - name: Install zig + cargo-zigbuild (musl targets)
-        if: contains(matrix.target, 'musl')
+      - name: Install zig + cargo-zigbuild (musl/gnu-cross targets)
+        if: contains(matrix.target, 'musl') || contains(matrix.target, 'gnueabihf')
         run: |
           pip install ziglang
           cargo install cargo-zigbuild
@@ -103,12 +103,8 @@ jobs:
           CFLAGS_x86_64_unknown_linux_musl: -I${{ env.ZIGLIB }}/libc/include/generic-glibc -I/usr/include
           CC_aarch64_unknown_linux_musl: zig cc -target aarch64-linux-musl
           CC_x86_64_unknown_linux_musl: zig cc -target x86_64-linux-musl
-          CC_armv7_unknown_linux_gnueabihf: arm-linux-gnueabihf-gcc
         run: |
-          if [ -n "${{ matrix.gnu_cross }}" ]; then
-            sudo apt-get install -y gcc-arm-linux-gnueabihf
-            cargo build --release --target ${{ matrix.target }}
-          elif [ "${{ contains(matrix.target, 'musl') }}" = "true" ]; then
+          if [ "${{ contains(matrix.target, 'musl') }}" = "true" ] || [ -n "${{ matrix.gnu_cross }}" ]; then
             cargo zigbuild --release --target ${{ matrix.target }}
           else
             cargo build --release --target ${{ matrix.target }}
