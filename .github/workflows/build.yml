@@ -59,16 +59,9 @@ jobs:
           mkdir -p $HOME/bin
           for T in x86_64-linux-musl aarch64-linux-musl; do
             BASE=$(echo $T | sed 's/-linux-musl//')
-            cat > $HOME/bin/${BASE}-unknown-linux-musl-cc <<WEOF
-#!/bin/sh
-args=""
-for a in "$@"; do
-  case "$a" in --target=*) ;; *) args="$args '$a'";; esac
-done
-exec python3 -m ziglang cc -target $T $args
-WEOF
+            printf '#!/bin/sh\nargs=""\nfor a in "$@"; do\n  case "$a" in --target=*) ;; *) args="$args $a";; esac\ndone\nexec python3 -m ziglang cc -target %s $args\n' "$T" > $HOME/bin/${BASE}-unknown-linux-musl-cc
             chmod +x $HOME/bin/${BASE}-unknown-linux-musl-cc
-          doneheaders
+          done
         if: matrix.ndk
         uses: nttld/setup-ndk@v1
         id: ndk
