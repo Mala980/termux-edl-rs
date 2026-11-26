@@ -22,6 +22,9 @@ pub struct UsbTransport {
 }
 
 impl UsbTransport {
+    fn log(&self, msg: &str) {
+        eprintln!("[LIB] {msg}");
+    }
     pub fn new() -> Self {
         Self { dev: None, iface_num: None, ep_out: None, ep_in: None, maxsize: 512 }
     }
@@ -90,9 +93,18 @@ impl Transport for UsbTransport {
             }
         }
         if ep_out.is_none() || ep_in.is_none() {
-            return Err(anyhow!("Couldn't find bulk endpoints. Aborting."));
+            // Same fallback as termux_usblib.py: default bulk endpoints.
+            ep_out = Some(0x01);
+            ep_in = Some(0x81);
+            ifnum = 0;
+            maxsize = 512;
         }
-        handle.claim_interface(ifnum)?;
+        // Claim, but don't hard-fail: python logs and continues (root/fuse
+        // fd-passing may already have claimed it).
+        let claim = handle.claim_interface(ifnum);
+        if let Err(e) = claim {
+            self.log(&format!("claim interface {ifnum}: {e} (continuing)"));
+        }
         self.dev = Some(handle);
         self.iface_num = Some(ifnum);
         self.ep_out = ep_out;
@@ -117,8 +129,11 @@ impl Transport for UsbTransport {
         let mut total = 0usize;
         let pkt = MAX_USB_BULK_BUFFER_SIZE;
         for chunk in data.chunks(pkt) {
-            let n = h.write_bulk(ep, chunk, Duration::from_secs(10))?;
-            total += n;
+            match h.write_bulk(ep, chunk, Duration::from_secs(10)) {
+                Ok(n) => total += n,
+                Err(rusb::Error::Timeout) => continue,
+                Err(e) => return Err(e.into()),
+            }
         }
         Ok(total)
     }
@@ -140,10 +155,15 @@ impl Transport for UsbTransport {
                         break; // short packet ends transfer
                     }
                 }
-                Err(e) if e == rusb::Error::Timeout => {
+                Err(rusb::Error::Timeout) => return Ok(res),
+                // Python usblib returns whatever it has on other errors
+                // instead of aborting the session.
+                Err(e) => {
+                    if res.is_empty() {
+                        return Err(e.into());
+                    }
                     return Ok(res);
                 }
-                Err(e) => return Err(e.into()),
             }
         }
         Ok(res)
