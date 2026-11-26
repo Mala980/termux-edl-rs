@@ -34,8 +34,9 @@ jobs:
           # Linux ARM
           - target: aarch64-unknown-linux-musl
             host: ubuntu-latest
-          - target: armv7-unknown-linux-musleabihf
+          - target: armv7-unknown-linux-gnueabihf
             host: ubuntu-latest
+            gnu_cross: true
           # Linux x86_64 (bonus, for testing)
           - target: x86_64-unknown-linux-musl
             host: ubuntu-latest
@@ -47,7 +48,11 @@ jobs:
           targets: ${{ matrix.target }}
       - name: Install musl cross toolchain
         if: contains(matrix.target, 'musl')
-        run: sudo apt-get update && sudo apt-get install -y musl-tools musl-dev
+        run: |
+          sudo apt-get update && sudo apt-get install -y musl-tools musl-dev linux-libc-dev
+          sudo cp -r /usr/include/linux /usr/include/asm-generic /usr/include/x86_64-linux-gnu/asm /usr/local/include/ 2>/dev/null || true
+          sudo mkdir -p /usr/include/x86_64-linux-musl
+          sudo cp -r /usr/include/linux /usr/include/asm-generic /usr/include/x86_64-linux-musl/ || true
       - name: Install Android NDK
         if: matrix.ndk
         uses: nttld/setup-ndk@v1
@@ -56,6 +61,11 @@ jobs:
           ndk-version: r26d
       - name: Configure Android NDK linker
         if: matrix.ndk
+        env:
+          CC_aarch64_linux_android: aarch64-linux-android-clang
+          CC_armv7_linux_androideabi: armv7-linux-androideabi-clang
+          AR_aarch64_linux_android: llvm-ar
+          AR_armv7_linux_androideabi: llvm-ar
         run: |
           NDK="${{ steps.ndk.outputs.ndk-path }}"
           if [ "${{ matrix.target }}" = "aarch64-linux-android" ]; then
@@ -63,14 +73,29 @@ jobs:
           else
             TRIPLE=armv7a-linux-androideabi; API=24
           fi
-          mkdir -p .cargo
+          mkdir -p .cargo $HOME/bin
+          BIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          # cc crate expects <triple>-clang; newer NDK ships <triple><api>-clang
+          ln -sf "$BIN/${TRIPLE}${API}-clang" "$HOME/bin/${TRIPLE}-clang"
+          echo "$HOME/bin" >> $GITHUB_PATH
           cat >> .cargo/config.toml <<EOF
           [target.${{ matrix.target }}]
-          linker = "$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/${TRIPLE}${API}-clang"
-          ar = "$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar"
+          linker = "$BIN/${TRIPLE}${API}-clang"
+          ar = "$BIN/llvm-ar"
           EOF
       - name: Build release
-        run: cargo build --release --target ${{ matrix.target }}
+        env:
+          # musl builds compile vendored libusb; needs linux headers on include path
+          CFLAGS_aarch64_unknown_linux_musl: -I/usr/include -I/usr/include/linux
+          CFLAGS_x86_64_unknown_linux_musl: -I/usr/include -I/usr/include/linux
+          CC_aarch64_unknown_linux_musl: aarch64-linux-musl-gcc
+          CC_x86_64_unknown_linux_musl: musl-gcc
+          CC_armv7_unknown_linux_gnueabihf: arm-linux-gnueabihf-gcc
+        run: |
+          if [ -n "${{ matrix.gnu_cross }}" ]; then
+            sudo apt-get install -y gcc-arm-linux-gnueabihf
+          fi
+          cargo build --release --target ${{ matrix.target }}
       - name: Prepare artifact
         run: |
           mkdir -p dist
