@@ -188,13 +188,11 @@ impl rusb::UsbContext for WeakCtx {
     }
 }
 
-impl Drop for WeakCtx {
-    fn drop(&mut self) {
-        unsafe { libusb1_sys::libusb_exit(self.0) };
-    }
-}
-
 impl WeakCtx {
+    // NOTE: no Drop/libusb_exit — rusb clones the context into every
+    // DeviceHandle, and exiting libusb per clone would use-after-free
+    // (segfault). The context lives for the process lifetime, same as
+    // LibUsbCtx in termux_usblib.py.
     pub fn new_android() -> Result<Self> {
         unsafe {
             libusb1_sys::libusb_set_option(
