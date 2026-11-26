@@ -1,0 +1,495 @@
+//! Firehose protocol (XML over the bulk transport) — port of edlclient/Library/firehose.py,
+//! covering the core commands: configure, read, program, erase, nop, reset, storage info.
+use crate::transport::Transport;
+use crate::xmlparser;
+use anyhow::{anyhow, Result};
+
+#[derive(Debug, Clone)]
+pub struct FirehoseResponse {
+    pub resp: bool,
+    pub data: Vec<u8>,
+    pub attrs: Vec<(String, String)>,
+    pub log: Vec<String>,
+    pub error: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct FirehoseConfig {
+    pub memory_name: String,
+    pub sector_size: u32,
+    pub max_payload_size_to_target: u32,
+    pub max_payload_size_from_target: u32,
+    pub max_xml_size: u32,
+    pub zlp_aware_host: u32,
+    pub skip_storage_init: bool,
+    pub skip_write: bool,
+    pub pages_per_block: u32,
+    pub target_name: String,
+    pub version: String,
+    pub max_lun: u32,
+}
+
+impl Default for FirehoseConfig {
+    fn default() -> Self {
+        Self {
+            memory_name: String::new(),
+            sector_size: 0,
+            max_payload_size_to_target: 0x100000,
+            max_payload_size_from_target: 4096,
+            max_xml_size: 4096,
+            zlp_aware_host: 1,
+            skip_storage_init: false,
+            skip_write: false,
+            pages_per_block: 0,
+            target_name: "Unknown".into(),
+            version: "Unknown".into(),
+            max_lun: 8,
+        }
+    }
+}
+
+pub struct Firehose<'a> {
+    pub cdc: &'a mut dyn Transport,
+    pub cfg: FirehoseConfig,
+    pub supported_functions: Vec<String>,
+    pub skipresponse: bool,
+}
+
+fn attr<'r>(attrs: &'r [(String, String)], key: &str) -> Option<&'r str> {
+    attrs.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str())
+}
+
+impl<'a> Firehose<'a> {
+    pub fn new(cdc: &'a mut dyn Transport) -> Self {
+        Self { cdc, cfg: FirehoseConfig::default(), supported_functions: Vec::new(), skipresponse: false }
+    }
+
+    fn read_until_response(&mut self, timeout_ms: u32) -> Vec<u8> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms.max(1) as u64);
+        let mut rdata = Vec::new();
+        while std::time::Instant::now() < deadline {
+            let tmp = self.cdc.read(0x10000, 200).unwrap_or_default();
+            if !tmp.is_empty() {
+                rdata.extend_from_slice(&tmp);
+                if find_sub(&rdata, b"<response value").is_some() {
+                    break;
+                }
+            }
+        }
+        rdata
+    }
+
+    fn xmlsend(&mut self, data: &[u8], skipresponse: bool) -> FirehoseResponse {
+        let _ = self.cdc.write(&data[..data.len().min(self.cfg.max_xml_size as usize)]);
+        if skipresponse {
+            return FirehoseResponse { resp: true, data: Vec::new(), attrs: Vec::new(), log: Vec::new(), error: String::new() };
+        }
+        let rdata = self.read_until_response(4000);
+        let attrs = xmlparser::getresponse(&rdata);
+        let log = xmlparser::getlog(&rdata);
+        let value = attr(&attrs, "value").unwrap_or("");
+        if value == "ACK" {
+            FirehoseResponse { resp: true, data: rdata, attrs, log, error: String::new() }
+        } else {
+            let error = log.join("\n");
+            FirehoseResponse { resp: false, data: rdata, attrs, log, error }
+        }
+    }
+
+    /// Send the configure command and negotiate payload sizes.
+    pub fn configure(&mut self) -> Result<()> {
+        if self.cfg.sector_size == 0 {
+            self.cfg.sector_size = if self.cfg.memory_name.eq_ignore_ascii_case("emmc") { 512 } else { 4096 };
+        }
+        let mut connectcmd = format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\" ?><data><configure MemoryName=\"{}\" Verbose=\"0\" \
+             AlwaysValidate=\"0\" MaxDigestTableSizeInBytes=\"2048\" \
+             MaxPayloadSizeToTargetInBytes=\"{}\" ZLPAwareHost=\"{}\" \
+             SkipStorageInit=\"{}\" SkipWrite=\"{}\"",
+            self.cfg.memory_name,
+            self.cfg.max_payload_size_to_target,
+            self.cfg.zlp_aware_host,
+            self.cfg.skip_storage_init as u8,
+            self.cfg.skip_write as u8,
+        );
+        if self.cfg.memory_name.eq_ignore_ascii_case("nand") && self.cfg.pages_per_block != 0 {
+            connectcmd += &format!(" PAGES_PER_BLOCK=\"{}\"", self.cfg.pages_per_block);
+        }
+        connectcmd += "/></data>";
+        let rsp = self.xmlsend(connectcmd.as_bytes(), false);
+        if !rsp.resp {
+            // Re-send once: many loaders answer the first configure with a NAK carrying params.
+            if let Some(v) = attr(&rsp.attrs, "MaxPayloadSizeToTargetInBytes") {
+                if let Ok(n) = v.parse() {
+                    self.cfg.max_payload_size_to_target = n;
+                }
+            }
+            if let Some(v) = attr(&rsp.attrs, "MemoryName") {
+                self.cfg.memory_name = v.to_string();
+            }
+            let rsp2 = self.xmlsend(connectcmd.as_bytes(), false);
+            if !rsp2.resp {
+                return Err(anyhow!("configure failed: {}", rsp2.error));
+            }
+        }
+        println!("[firehose] TargetName={}", self.cfg.target_name);
+        println!("[firehose] MemoryName={}", self.cfg.memory_name);
+        println!("[firehose] Version={}", self.cfg.version);
+        // Read one sector as a sanity check.
+        let rsp = self.cmd_read_buffer(0, 1, 1, false)?;
+        if !rsp.resp {
+            return Err(anyhow!("Failed to read sector 0 after configure (sector size mismatch? try --sectorsize)"));
+        }
+        Ok(())
+    }
+
+    pub fn wait_for_data(&mut self) -> Vec<u8> {
+        let mut tmp = Vec::new();
+        let mut empties = 0;
+        while find_sub(&tmp, b"response value").is_none() {
+            let res = self.cdc.read(0x10000, 1000).unwrap_or_default();
+            if res.is_empty() {
+                empties += 1;
+                if empties == 4 {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            } else {
+                empties = 0;
+                tmp.extend_from_slice(&res);
+            }
+        }
+        tmp
+    }
+
+    pub fn cmd_nop(&mut self) -> Result<Vec<String>> {
+        let data = b"<?xml version=\"1.0\" ?><data><nop /></data>";
+        let rsp = self.xmlsend(data, false);
+        let mut info = Vec::new();
+        let mut tmp = Vec::new();
+        loop {
+            let chunk = self.cdc.read(0x10000, 500).unwrap_or_default();
+            if chunk.is_empty() {
+                break;
+            }
+            tmp.extend_from_slice(&chunk);
+        }
+        if !tmp.is_empty() {
+            info = xmlparser::getlog(&tmp);
+        }
+        if rsp.resp {
+            Ok(info)
+        } else {
+            Err(anyhow!("Nop failed: {}", rsp.error))
+        }
+    }
+
+    pub fn cmd_reset(&mut self, mode: &str) -> bool {
+        let data = format!("<?xml version=\"1.0\" ?><data><power value=\"{mode}\"/></data>");
+        let val = self.xmlsend(data.as_bytes(), false);
+        if val.resp {
+            println!("[firehose] Reset succeeded.");
+        } else {
+            eprintln!("[firehose:err] Reset failed: {}", val.error);
+        }
+        val.resp
+    }
+
+    pub fn cmd_read_buffer(
+        &mut self,
+        physical_partition_number: u32,
+        start_sector: u64,
+        num_partition_sectors: u64,
+        display: bool,
+    ) -> Result<FirehoseResponse> {
+        if display {
+            println!(
+                "[firehose] Reading from physical partition {physical_partition_number}, sector {start_sector}, sectors {num_partition_sectors}"
+            );
+        }
+        let mut data = format!(
+            "<?xml version=\"1.0\" ?><data><read SECTOR_SIZE_IN_BYTES=\"{}\" num_partition_sectors=\"{}\" \
+             physical_partition_number=\"{}\" start_sector=\"{}\"",
+            self.cfg.sector_size, num_partition_sectors, physical_partition_number, start_sector
+        );
+        data += &self.nand_pages_attr();
+        data += "/></data>";
+        let rsp = self.xmlsend(data.as_bytes(), self.skipresponse);
+        if !rsp.resp {
+            if display {
+                eprintln!("[firehose:err] {}", rsp.error);
+            }
+            return Ok(rsp);
+        }
+        let bytestoread = self.cfg.sector_size as usize * num_partition_sectors as usize;
+        let mut res_data = Vec::with_capacity(bytestoread);
+        let mut remaining = bytestoread;
+        while remaining > 0 {
+            let want = remaining.min(0x100000);
+            let tmp = self.cdc.read(want, 5000).unwrap_or_default();
+            if tmp.is_empty() {
+                break;
+            }
+            remaining -= tmp.len();
+            res_data.extend_from_slice(&tmp);
+        }
+        let wd = self.wait_for_data();
+        let log = xmlparser::getlog(&wd);
+        let attrs = xmlparser::getresponse(&wd);
+        let value = attr(&attrs, "value").unwrap_or("");
+        if value == "ACK" {
+            Ok(FirehoseResponse { resp: true, data: res_data, attrs, log, error: String::new() })
+        } else {
+            Ok(FirehoseResponse { resp: false, data: res_data, attrs, error: log.join("\n"), log })
+        }
+    }
+
+    pub fn cmd_read(
+        &mut self,
+        physical_partition_number: u32,
+        start_sector: u64,
+        num_partition_sectors: u64,
+        filename: &str,
+        display: bool,
+    ) -> Result<bool> {
+        let rsp = self.cmd_read_buffer(physical_partition_number, start_sector, num_partition_sectors, display)?;
+        if !rsp.resp {
+            return Ok(false);
+        }
+        std::fs::write(filename, &rsp.data)?;
+        Ok(true)
+    }
+
+    pub fn cmd_program(
+        &mut self,
+        physical_partition_number: u32,
+        start_sector: u64,
+        filename: &str,
+        display: bool,
+    ) -> Result<bool> {
+        let filedata = std::fs::read(filename)?;
+        self.cmd_program_buffer(physical_partition_number, start_sector, &filedata, display)
+    }
+
+    pub fn cmd_program_buffer(
+        &mut self,
+        physical_partition_number: u32,
+        start_sector: u64,
+        wfdata: &[u8],
+        display: bool,
+    ) -> Result<bool> {
+        let total = wfdata.len();
+        let ss = self.cfg.sector_size as usize;
+        let mut num_partition_sectors = total / ss;
+        if total % ss != 0 {
+            num_partition_sectors += 1;
+        }
+        if display {
+            println!(
+                "[firehose] Writing to physical partition {physical_partition_number}, sector {start_sector}, sectors {num_partition_sectors}"
+            );
+        }
+        let mut data = format!(
+            "<?xml version=\"1.0\" ?><data><program SECTOR_SIZE_IN_BYTES=\"{}\" num_partition_sectors=\"{}\" \
+             physical_partition_number=\"{}\" start_sector=\"{}\"",
+            self.cfg.sector_size, num_partition_sectors, physical_partition_number, start_sector
+        );
+        data += &self.nand_pages_attr();
+        data += " /></data>";
+        let rsp = self.xmlsend(data.as_bytes(), self.skipresponse);
+        if !rsp.resp {
+            eprintln!("[firehose:err] {}", rsp.error);
+            return Ok(false);
+        }
+        let mut pos = 0usize;
+        let maxpayload = self.cfg.max_payload_size_to_target as usize;
+        while pos < total {
+            let wlen = (total - pos).min(maxpayload);
+            let mut wrdata = wfdata[pos..pos + wlen].to_vec();
+            pos += wlen;
+            if wrdata.len() % ss != 0 {
+                let fill = (wrdata.len() / ss + 1) * ss;
+                wrdata.resize(fill, 0);
+            }
+            self.cdc.write(&wrdata)?;
+            // Zero-length write (ZLP) as in the original.
+            let _ = self.cdc.write(b"");
+            show_progress("Write", pos, total);
+        }
+        let wd = self.wait_for_data();
+        let log = xmlparser::getlog(&wd);
+        let attrs = xmlparser::getresponse(&wd);
+        let value = attr(&attrs, "value").unwrap_or("");
+        if value != "ACK" {
+            eprintln!("[firehose:err] Program failed:");
+            for line in &log {
+                eprintln!("  {line}");
+            }
+            return Ok(false);
+        }
+        Ok(true)
+    }
+
+    pub fn cmd_erase(
+        &mut self,
+        physical_partition_number: u32,
+        start_sector: u64,
+        num_partition_sectors: u64,
+        display: bool,
+    ) -> Result<bool> {
+        if display {
+            println!(
+                "[firehose] Erasing from physical partition {physical_partition_number}, sector {start_sector}, sectors {num_partition_sectors}"
+            );
+        }
+        let has_erase = self.supported_functions.iter().any(|f| f.eq_ignore_ascii_case("erase"));
+        let cmd = if has_erase { "erase" } else { "program" };
+        let mut data = format!(
+            "<?xml version=\"1.0\" ?><data><{cmd} SECTOR_SIZE_IN_BYTES=\"{}\" num_partition_sectors=\"{}\" \
+             physical_partition_number=\"{}\" start_sector=\"{}\"",
+            self.cfg.sector_size, num_partition_sectors, physical_partition_number, start_sector
+        );
+        data += &self.nand_pages_attr();
+        data += " /></data>";
+        let rsp = self.xmlsend(data.as_bytes(), self.skipresponse);
+        if !rsp.resp {
+            eprintln!("[firehose:err] {}", rsp.error);
+            return Ok(false);
+        }
+        if has_erase {
+            return Ok(true);
+        }
+        // Write zeros over the range (program-based erase).
+        let empty = vec![0u8; self.cfg.max_payload_size_to_target as usize];
+        let ss = self.cfg.sector_size as usize;
+        let mut bytestowrite = ss * num_partition_sectors as usize;
+        let total = bytestowrite;
+        while bytestowrite > 0 {
+            let wlen = bytestowrite.min(self.cfg.max_payload_size_to_target as usize);
+            self.cdc.write(&empty[..wlen])?;
+            self.cdc.write(b"")?;
+            bytestowrite -= wlen;
+            show_progress("Erase", total - bytestowrite, total);
+        }
+        let wd = self.wait_for_data();
+        let log = xmlparser::getlog(&wd);
+        let attrs = xmlparser::getresponse(&wd);
+        Ok(attr(&attrs, "value").unwrap_or("") == "ACK" || {
+            for line in &log {
+                eprintln!("  {line}");
+            }
+            false
+        })
+    }
+
+    fn nand_pages_attr(&self) -> String {
+        if self.cfg.memory_name.eq_ignore_ascii_case("nand") && self.cfg.pages_per_block != 0 {
+            format!(" PAGES_PER_BLOCK=\"{}\"", self.cfg.pages_per_block)
+        } else {
+            String::new()
+        }
+    }
+
+    /// Read the GPT from the given LUN and parse it.
+    pub fn get_gpt(
+        &mut self,
+        lun: u32,
+        sector_size_hint: Option<u32>,
+    ) -> Result<Option<(Vec<u8>, crate::gpt::Gpt)>> {
+        let ss = sector_size_hint.unwrap_or(self.cfg.sector_size);
+        let rsp = self.cmd_read_buffer(lun, 0, 1, false)?;
+        if !rsp.resp {
+            return Err(anyhow!("Failed reading sector 0 on lun {lun}"));
+        }
+        let mut data = rsp.data.clone();
+        let rsp2 = self.cmd_read_buffer(lun, 1, 1, false)?;
+        data.extend_from_slice(&rsp2.data);
+        // Nand partition table magic check (0x844bdcd1 header at sector 0).
+        if data.len() >= 4 && u32::from_le_bytes(data[0..4].try_into().unwrap()) == 0x844bdcd1 {
+            println!("[firehose] Nand storage detected — use 'rs' for raw sector access.");
+            return Ok(None);
+        }
+        let mut guid_gpt = crate::gpt::Gpt::new();
+        if let Some(hdr) = crate::gpt::Gpt::parseheader(&data, ss as usize) {
+            if hdr.num_part_entries > 0 && hdr.part_entry_size > 0 {
+                let part_table_size = hdr.num_part_entries as u64 * hdr.part_entry_size as u64;
+                let mut sectors = part_table_size / ss as u64;
+                if part_table_size % ss as u64 != 0 {
+                    sectors += 1;
+                }
+                let sectors = sectors.clamp(1, 64);
+                let start_lba = if hdr.part_entry_start_lba != 0 { hdr.part_entry_start_lba } else { 2 };
+                let rsp3 = self.cmd_read_buffer(lun, start_lba, sectors, false)?;
+                data.extend_from_slice(&rsp3.data);
+                if guid_gpt.parse(&data, ss as usize) {
+                    return Ok(Some((data, guid_gpt)));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    /// Parse storage info from a getstorageinfo response and adapt sector size / luns.
+    pub fn cmd_getstorageinfo(&mut self) -> Result<()> {
+        let data = b"<?xml version=\"1.0\" ?><data><getstorageinfo physical_partition_number=\"0\"/></data>";
+        let rsp = self.xmlsend(data, false);
+        let mut info = Vec::new();
+        if !rsp.data.is_empty() {
+            info.extend(rsp.log.clone());
+            // Some loaders emit storage_info JSON inside log lines.
+            for line in &rsp.log {
+                println!("[storageinfo] {line}");
+                if line.contains("UFS Erase Block Size") {
+                    if let Some(v) = extract_hex(line) {
+                        if v > 0 {
+                            self.cfg.sector_size = 4096;
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn getluns(&self, lun_arg: Option<u32>) -> Vec<u32> {
+        if let Some(l) = lun_arg {
+            return vec![l];
+        }
+        if self.cfg.memory_name.eq_ignore_ascii_case("ufs") {
+            (0..self.cfg.max_lun).collect()
+        } else {
+            vec![0]
+        }
+    }
+}
+
+fn extract_hex(line: &str) -> Option<u32> {
+    let idx = line.find("0x")?;
+    let rest = &line[idx + 2..];
+    let end = rest
+        .find(|c: char| !c.is_ascii_hexdigit())
+        .unwrap_or(rest.len());
+    u32::from_str_radix(&rest[..end], 16).ok()
+}
+
+pub fn find_sub(hay: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.len() > hay.len() {
+        return None;
+    }
+    hay.windows(needle.len()).position(|w| w == needle)
+}
+
+pub fn show_progress(prefix: &str, pos: usize, total: usize) {
+    if total == 0 {
+        return;
+    }
+    let pct = (pos as f64 / total as f64 * 100.0).min(100.0);
+    let filled = (pct / 2.0) as usize;
+    let bar = "=".repeat(filled) + &" ".repeat(50 - filled);
+    print!("\r{prefix} Progress: [{bar}] {:.1}% complete", pct);
+    use std::io::Write;
+    let _ = std::io::stdout().flush();
+    if pct >= 100.0 {
+        println!();
+    }
+}

@@ -1,0 +1,100 @@
+name: Build & Release
+
+on:
+  push:
+    branches: [main, master]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --all
+
+  build:
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Android/Termux — Android NDK cross-compile (aarch64 + armv7)
+          - target: aarch64-linux-android
+            host: ubuntu-latest
+            ndk: true
+          - target: armv7-linux-androideabi
+            host: ubuntu-latest
+            ndk: true
+          # Linux ARM
+          - target: aarch64-unknown-linux-musl
+            host: ubuntu-latest
+          - target: armv7-unknown-linux-musleabihf
+            host: ubuntu-latest
+          # Linux x86_64 (bonus, for testing)
+          - target: x86_64-unknown-linux-musl
+            host: ubuntu-latest
+    runs-on: ${{ matrix.host }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Install musl cross toolchain
+        if: contains(matrix.target, 'musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools musl-dev
+      - name: Install Android NDK
+        if: matrix.ndk
+        uses: nttld/setup-ndk@v1
+        id: ndk
+        with:
+          ndk-version: r26d
+      - name: Configure Android NDK linker
+        if: matrix.ndk
+        run: |
+          NDK="${{ steps.ndk.outputs.ndk-path }}"
+          if [ "${{ matrix.target }}" = "aarch64-linux-android" ]; then
+            TRIPLE=aarch64-linux-android; API=24
+          else
+            TRIPLE=armv7a-linux-androideabi; API=24
+          fi
+          mkdir -p .cargo
+          cat >> .cargo/config.toml <<EOF
+          [target.${{ matrix.target }}]
+          linker = "$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/${TRIPLE}${API}-clang"
+          ar = "$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar"
+          EOF
+      - name: Build release
+        run: cargo build --release --target ${{ matrix.target }}
+      - name: Prepare artifact
+        run: |
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/edl-rs dist/edl-rs-${{ matrix.target }}
+          file dist/edl-rs-${{ matrix.target }} || true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: edl-rs-${{ matrix.target }}
+          path: dist/
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+          path: dist
+      - name: Compress binaries
+        run: cd dist && for f in edl-rs-*; do gzip -k "$f"; done
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
