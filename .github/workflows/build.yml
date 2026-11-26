@@ -56,6 +56,12 @@ jobs:
         run: |
           ZIGVER=$(python3 -c "import ziglang,os;print(os.path.dirname(ziglang.__file__))")
           echo "ZIGLIB=$ZIGVER" >> $GITHUB_ENV
+          mkdir -p $HOME/bin
+          for T in x86_64-linux-musl aarch64-linux-musl; do
+            printf '#!/bin/sh\nexec python3 -m ziglang cc -target %s "$@"\n' "$T" > $HOME/bin/${T%-linux-musl}-unknown-linux-musl-cc
+            chmod +x $HOME/bin/${T%-linux-musl}-unknown-linux-musl-cc
+          done
+          echo "$HOME/bin" >> $GITHUB_PATH
       - name: Install Android NDK
         if: matrix.ndk
         uses: nttld/setup-ndk@v1
@@ -98,11 +104,13 @@ jobs:
           CC_armv7_linux_androideabi: arm-linux-androideabi-clang
           AR_aarch64_linux_android: llvm-ar
           AR_armv7_linux_androideabi: llvm-ar
+          CFLAGS_aarch64_linux_android: -I/usr/include -I/usr/include/linux -DHAVE_LINUX_MAGIC_H
+          CFLAGS_armv7_linux_androideabi: -I/usr/include -I/usr/include/linux -DHAVE_LINUX_MAGIC_H
           # musl builds compile vendored libusb; needs linux headers on include path
           CFLAGS_aarch64_unknown_linux_musl: -I${{ env.ZIGLIB }}/libc/include/generic-glibc -I/usr/include
           CFLAGS_x86_64_unknown_linux_musl: -I${{ env.ZIGLIB }}/libc/include/generic-glibc -I/usr/include
-          CC_aarch64_unknown_linux_musl: zig cc -target aarch64-linux-musl
-          CC_x86_64_unknown_linux_musl: zig cc -target x86_64-linux-musl
+          CC_aarch64_unknown_linux_musl: aarch64-unknown-linux-musl-cc
+          CC_x86_64_unknown_linux_musl: x86_64-unknown-linux-musl-cc
         run: |
           if [ "${{ contains(matrix.target, 'musl') }}" = "true" ] || [ -n "${{ matrix.gnu_cross }}" ]; then
             cargo zigbuild --release --target ${{ matrix.target }}
