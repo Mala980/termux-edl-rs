@@ -188,9 +188,14 @@ impl<'a> Sahara<'a> {
     pub fn connect(&mut self) -> String {
         let v = self.raw_read(0xC * 4, 1000);
         if v.len() > 1 && v[0] == 0x01 && rd_u32(&v, 0) == defs::cmd::HELLO_REQ {
-            if let SaharaPkt::Hello { version, pktsize, .. } = self.get_rsp() {
-                self.info.version = version;
-                self.dbg(&format!("protocol version {version}, pktsize {pktsize:#x}"));
+            // Parse the HELLO_REQ we already read (do not re-read the wire).
+            if v.len() >= 0x18 {
+                self.info.version = rd_u32(&v, 8);
+                self.dbg(&format!(
+                    "protocol version {}, pktsize {:#x}",
+                    self.info.version,
+                    rd_u32(&v, 16)
+                ));
             }
             return "sahara".into();
         }
