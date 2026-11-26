@@ -11,9 +11,17 @@ pub struct LoaderDb {
 impl LoaderDb {
     pub fn scan(dir: &str) -> Self {
         let mut db: HashMap<String, HashMap<String, String>> = HashMap::new();
-        let Ok(rd) = std::fs::read_dir(dir) else { return Self { db } };
-        for entry in rd.flatten() {
-            let filename = entry.file_name().to_string_lossy().to_string();
+        // Recursive walk like os.walk in loader_db.py (Loaders/<vendor>/<file>).
+        let mut stack = vec![std::path::PathBuf::from(dir)];
+        while let Some(d) = stack.pop() {
+            let Ok(rd) = std::fs::read_dir(&d) else { continue };
+            for entry in rd.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                let filename = entry.file_name().to_string_lossy().to_string();
             if !filename.ends_with(".bin") && !filename.ends_with(".mbn") && !filename.ends_with(".elf") {
                 continue;
             }
@@ -37,6 +45,7 @@ impl LoaderDb {
                     .entry(pkhash.clone())
                     .or_insert(entry.path().to_string_lossy().to_string());
             }
+        }
         }
         Self { db }
     }

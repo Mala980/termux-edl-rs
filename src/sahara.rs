@@ -301,7 +301,21 @@ impl<'a> Sahara<'a> {
         self.info(&format!("- Sahara version  : {version}"));
         self.info(&format!("- Chip Serial Number : {serial:08x}"));
 
-        let pkhash = self.cmd_exec(defs::exec::OEM_PK_HASH_READ).map(|r| r.hex());
+        let pkhash = self.cmd_exec(defs::exec::OEM_PK_HASH_READ).map(|r| {
+            // Deduplicate like cmdexec_get_pkhash: if the first 4 bytes repeat,
+            // cut at the second occurrence (device may echo the cert table).
+            let mut bytes = r.clone();
+            if bytes.len() > 4 {
+                let head = &bytes[0..4];
+                if let Some(idx) = bytes[4..]
+                    .windows(4)
+                    .position(|w| w == head)
+                {
+                    bytes.truncate(4 + idx);
+                }
+            }
+            bytes.hex()
+        });
         if version < 3 {
             let hwid = self.cmd_exec(defs::exec::MSM_HW_ID_READ)
                 .map(|r| u64::from_le_bytes(r[..8].try_into().unwrap_or([0; 8])));
