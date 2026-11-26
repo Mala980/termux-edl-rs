@@ -57,11 +57,13 @@ jobs:
           ZIGVER=$(python3 -c "import ziglang,os;print(os.path.dirname(ziglang.__file__))")
           echo "ZIGLIB=$ZIGVER" >> $GITHUB_ENV
           mkdir -p $HOME/bin
+          mkdir -p wrappers
           for T in x86_64-linux-musl aarch64-linux-musl; do
             BASE=$(echo $T | sed 's/-linux-musl//')
-            printf '#!/bin/sh\nargs=""\nfor a in "$@"; do\n  case "$a" in --target=*) ;; *) args="$args $a";; esac\ndone\nexec python3 -m ziglang cc -target %s $args\n' "$T" > $HOME/bin/${BASE}-unknown-linux-musl-cc
-            chmod +x $HOME/bin/${BASE}-unknown-linux-musl-cc
+            printf '#!/bin/sh\nargs=""\nfor a in "$@"; do\n  case "$a" in --target=*) ;; *) args="$args $a";; esac\ndone\nexec python3 -m ziglang cc -target %s $args\n' "$T" > wrappers/${BASE}-unknown-linux-musl-cc
+            chmod +x wrappers/${BASE}-unknown-linux-musl-cc
           done
+          echo "WRAPPER_DIR=$PWD/wrappers" >> $GITHUB_ENV
       - name: Install Android NDK + linux-headers
         if: matrix.ndk
         uses: nttld/setup-ndk@v1
@@ -73,8 +75,8 @@ jobs:
         env:
           CC_aarch64_linux_android: aarch64-linux-android-clang
           CC_armv7_linux_androideabi: armv7-linux-androideabi-clang
-          AR_aarch64_linux_android: llvm-ar
-          AR_armv7_linux_androideabi: llvm-ar
+          AR_aarch64_linux_android: ${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar
+          AR_armv7_linux_androideabi: ${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar
         run: |
           sudo apt-get update -y && sudo apt-get install -y linux-headers-generic >/dev/null 2>&1 || true
           echo "LINH=$(ls -d /usr/src/linux-headers-*-generic* 2>/dev/null | head -1)" >> $GITHUB_ENV
@@ -105,8 +107,8 @@ jobs:
         env:
           CC_aarch64_linux_android: aarch64-linux-android-clang
           CC_armv7_linux_androideabi: arm-linux-androideabi-clang
-          AR_aarch64_linux_android: llvm-ar
-          AR_armv7_linux_androideabi: llvm-ar
+          AR_aarch64_linux_android: ${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar
+          AR_armv7_linux_androideabi: ${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar
           CFLAGS_aarch64_linux_android: --sysroot=${{ env.NDKSYS }} -isystem ${{ env.LINH }}/include/uapi -isystem ${{ env.LINH }}/arch/arm64/include/uapi -isystem ${{ env.LINH }}/arch/arm64/include/generated/uapi -DHAVE_LINUX_MAGIC_H
           CFLAGS_armv7_linux_androideabi: --sysroot=${{ env.NDKSYS }} -isystem ${{ env.LINH }}/include/uapi -isystem ${{ env.LINH }}/arch/arm/include/uapi -isystem ${{ env.LINH }}/arch/arm/include/generated/uapi -DHAVE_LINUX_MAGIC_H
           LDFLAGS_aarch64_linux_android: --sysroot=${{ env.NDKSYS }}
@@ -114,8 +116,8 @@ jobs:
           # musl builds compile vendored libusb; needs linux headers on include path
           CFLAGS_aarch64_unknown_linux_musl: -I${{ env.ZIGLIB }}/libc/include/aarch64-linux-musl -I${{ env.ZIGLIB }}/libc/include/generic-musl
           CFLAGS_x86_64_unknown_linux_musl: -I${{ env.ZIGLIB }}/libc/include/x86_64-linux-musl -I${{ env.ZIGLIB }}/libc/include/generic-musl
-          CC_aarch64_unknown_linux_musl: aarch64-unknown-linux-musl-cc
-          CC_x86_64_unknown_linux_musl: x86_64-unknown-linux-musl-cc
+          CC_aarch64_unknown_linux_musl: ${{ env.WRAPPER_DIR }}/aarch64-unknown-linux-musl-cc
+          CC_x86_64_unknown_linux_musl: ${{ env.WRAPPER_DIR }}/x86_64-unknown-linux-musl-cc
         run: |
           if [ "${{ contains(matrix.target, 'musl') }}" = "true" ] || [ -n "${{ matrix.gnu_cross }}" ]; then
             cargo zigbuild --release --target ${{ matrix.target }}
