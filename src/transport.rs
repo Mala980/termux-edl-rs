@@ -3,6 +3,7 @@ use crate::config_tables::{DEFAULT_IDS, MAX_USB_BULK_BUFFER_SIZE};
 use anyhow::{anyhow, Result};
 use std::time::Duration;
 use rusb::UsbContext;
+use libusb1_sys as libusb1_sys;
 
 pub trait Transport: Send {
     fn connect(&mut self, vid: u16, pid: u16) -> Result<()>;
@@ -172,12 +173,50 @@ impl Transport for UsbTransport {
 }
 
 
+
+/// Raw libusb context with NO_DEVICE_DISCOVERY enabled (required on Android,
+/// mirrors LibUsbCtx.get_ctx() in termux_usblib.py which sets option 2).
+#[derive(Clone)]
+pub struct WeakCtx(*mut libusb1_sys::libusb_context);
+
+unsafe impl Send for WeakCtx {}
+unsafe impl Sync for WeakCtx {}
+
+impl rusb::UsbContext for WeakCtx {
+    fn as_raw(&self) -> *mut libusb1_sys::libusb_context {
+        self.0
+    }
+}
+
+impl Drop for WeakCtx {
+    fn drop(&mut self) {
+        unsafe { libusb1_sys::libusb_exit(self.0) };
+    }
+}
+
+impl WeakCtx {
+    pub fn new_android() -> Result<Self> {
+        unsafe {
+            libusb1_sys::libusb_set_option(
+                std::ptr::null_mut(),
+                libusb1_sys::constants::LIBUSB_OPTION_NO_DEVICE_DISCOVERY,
+            );
+        }
+        let mut ctx: *mut libusb1_sys::libusb_context = std::ptr::null_mut();
+        let ret = unsafe { libusb1_sys::libusb_init(&mut ctx) };
+        if ret != 0 {
+            anyhow::bail!("libusb_init failed: {ret}");
+        }
+        Ok(WeakCtx(ctx))
+    }
+}
+
 /// Termux USB transport: uses `termux-usb -E -r <node>` to obtain an usbfs FD
 /// (fd-passing over a unix socketpair) and wraps it with
 /// libusb_wrap_sys_device — exactly like termux_usblib.py. Required on
 /// Android where direct /dev/bus/usb access is blocked by SELinux.
 pub struct TermuxTransport {
-    handle: Option<rusb::DeviceHandle<rusb::Context>>,
+    handle: Option<rusb::DeviceHandle<WeakCtx>>,
     fd: i32,
     ep_out: u8,
     ep_in: u8,
@@ -292,7 +331,7 @@ impl TermuxTransport {
     /// Open a Termux device node and wrap the FD with libusb.
     pub fn connect_node(node: &str) -> Result<Self> {
         let fd = Self::open_node_fd(node)?;
-        let ctx = rusb::Context::new()?;
+        let ctx = WeakCtx::new_android()?;
         let handle = unsafe { ctx.open_device_with_fd(fd) }
             .map_err(|e| anyhow!("libusb_wrap_sys_device({node}) failed: {e}"))?;
         Ok(Self { handle: Some(handle), fd, ep_out: 0x01, ep_in: 0x81, maxsize: 512 })
