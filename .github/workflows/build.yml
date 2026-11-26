@@ -62,6 +62,7 @@ jobs:
             printf '#!/bin/sh\nargs=""\nfor a in "$@"; do\n  case "$a" in --target=*) ;; *) args="$args $a";; esac\ndone\nexec python3 -m ziglang cc -target %s $args\n' "$T" > $HOME/bin/${BASE}-unknown-linux-musl-cc
             chmod +x $HOME/bin/${BASE}-unknown-linux-musl-cc
           done
+      - name: Install Android NDK + linux-headers
         if: matrix.ndk
         uses: nttld/setup-ndk@v1
         id: ndk
