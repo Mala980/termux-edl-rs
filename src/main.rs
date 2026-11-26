@@ -6,7 +6,7 @@
 use anyhow::{anyhow, Result};
 use termux_edl_rs::{firehose, gpt, loader_db, sahara, transport};
 use clap::Parser as ClapParser;
-use transport::{SerialTransport, Transport, UsbTransport};
+use transport::{SerialTransport, TermuxTransport, Transport, UsbTransport};
 
 /// Qualcomm Sahara / Firehose EDL Client (Rust) V1.0
 #[derive(ClapParser, Debug)]
@@ -117,6 +117,23 @@ fn main() -> Result<()> {
     let args = Args::parse();
     println!("Qualcomm Sahara / Firehose EDL Client (Rust) V1.0 (c) B.Kerler 2018-2025, rust port Mala980.");
 
+    if args.list && on_termux() {
+        let nodes = TermuxTransport::list_nodes();
+        if nodes.is_empty() {
+            println!("No EDL devices found.");
+        }
+        for node in &nodes {
+            if let Ok(mut t) = TermuxTransport::connect_node(node) {
+                if let Ok(d) = t.device_descriptor() {
+                    println!("EDL device candidate {node}: {:04x}:{:04x}", d.vendor_id(), d.product_id());
+                }
+                t.close();
+            } else {
+                println!("{node} (no access — run termux-usb to grant)");
+            }
+        }
+        std::process::exit(0);
+    }
     if args.list {
         let devs = UsbTransport::list_devices();
         if devs.is_empty() {
@@ -168,7 +185,42 @@ fn open_transport(args: &Args) -> Result<Box<dyn Transport>> {
         println!("[edl] Using serial port {path}");
         return Ok(Box::new(SerialTransport::open(&path)?));
     }
+    if on_termux() {
+        // Termux: must use termux-usb fd passing. Find the matching node by
+        // opening each candidate and comparing VID/PID (like python _try_device).
+        let (vid, pid) = resolve_vid_pid(args);
+        let nodes = TermuxTransport::list_nodes();
+        for node in &nodes {
+            match TermuxTransport::connect_node(node) {
+                Ok(mut t) => {
+                    // Check identity: read descriptor via the wrapped handle.
+                    if let Ok(desc) = t.device_descriptor() {
+                        if desc.vendor_id() == vid && desc.product_id() == pid {
+                            println!("Detected EDL device {vid:04x}:{pid:04x} at {node}");
+                            return Ok(Box::new(t));
+                        }
+                    }
+                    // Not a match; close and continue.
+                    t.close();
+                }
+                Err(e) => eprintln!("[LIB] {node}: {e}"),
+            }
+        }
+        anyhow::bail!("No EDL device {vid:04x}:{pid:04x} found via termux-usb. Grant USB permission and replug.");
+    }
     Ok(Box::new(UsbTransport::new()))
+}
+
+/// True when running inside Termux (Android).
+fn on_termux() -> bool {
+    std::env::var("TERMUX_VERSION").is_ok()
+        || std::env::var("PREFIX").map(|p| p.contains("com.termux")).unwrap_or(false)
+        || std::path::Path::new("/data/data/com.termux").exists()
+}
+
+/// Expose device_descriptor() on TermuxTransport for identity check.
+trait DeviceDescriptor {
+    fn device_descriptor(&self) -> Result<rusb::DeviceDescriptor>;
 }
 
 fn resolve_vid_pid(args: &Args) -> (u16, u16) {
