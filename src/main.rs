@@ -2,17 +2,9 @@
 //! (Qualcomm Sahara / Firehose EDL client) for Android/Termux, Linux arm64/armv7.
 //! GPLv3 — derived from B.Kerler's edl (https://github.com/bkerler/edl).
 
-mod config_tables;
-mod firehose;
-mod gpt;
-mod hdlc;
-mod loader_db;
-mod sahara;
-mod streaming;
-mod transport;
-mod xmlparser;
 
 use anyhow::{anyhow, Result};
+use termux_edl_rs::{firehose, gpt, loader_db, sahara, transport};
 use clap::Parser as ClapParser;
 use transport::{SerialTransport, Transport, UsbTransport};
 
