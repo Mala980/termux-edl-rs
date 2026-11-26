@@ -58,8 +58,9 @@ jobs:
           echo "ZIGLIB=$ZIGVER" >> $GITHUB_ENV
           mkdir -p $HOME/bin
           for T in x86_64-linux-musl aarch64-linux-musl; do
-            printf '#!/bin/sh\nexec python3 -m ziglang cc -target %s "$@"\n' "$T" > $HOME/bin/${T%-linux-musl}-unknown-linux-musl-cc
-            chmod +x $HOME/bin/${T%-linux-musl}-unknown-linux-musl-cc
+            BASE=$(echo $T | sed 's/-linux-musl//')
+            printf '#!/bin/sh\nexec python3 -m ziglang cc -target %s "$@"\n' "$T" > $HOME/bin/${BASE}-unknown-linux-musl-cc
+            chmod +x $HOME/bin/${BASE}-unknown-linux-musl-cc
           done
           echo "$HOME/bin" >> $GITHUB_PATH
       - name: Install Android NDK + linux-headers
@@ -104,8 +105,10 @@ jobs:
           CC_armv7_linux_androideabi: arm-linux-androideabi-clang
           AR_aarch64_linux_android: llvm-ar
           AR_armv7_linux_androideabi: llvm-ar
-          CFLAGS_aarch64_linux_android: -I${{ env.LINH }}/include -I${{ env.LINH }}/arch/arm64/include/uapi -I${{ env.LINH }}/include/uapi -DHAVE_LINUX_MAGIC_H
-          CFLAGS_armv7_linux_androideabi: -I${{ env.LINH }}/include -I${{ env.LINH }}/arch/arm/include/uapi -I${{ env.LINH }}/include/uapi -DHAVE_LINUX_MAGIC_H
+          CFLAGS_aarch64_linux_android: --sysroot=${{ env.NDKSYS }} -isystem ${{ env.LINH }}/include -isystem ${{ env.LINH }}/arch/arm64/include/uapi -isystem ${{ env.LINH }}/include/uapi -DHAVE_LINUX_MAGIC_H
+          CFLAGS_armv7_linux_androideabi: --sysroot=${{ env.NDKSYS }} -isystem ${{ env.LINH }}/include -isystem ${{ env.LINH }}/arch/arm/include/uapi -isystem ${{ env.LINH }}/include/uapi -DHAVE_LINUX_MAGIC_H
+          LDFLAGS_aarch64_linux_android: --sysroot=${{ env.NDKSYS }}
+          LDFLAGS_armv7_linux_androideabi: --sysroot=${{ env.NDKSYS }}
           # musl builds compile vendored libusb; needs linux headers on include path
           CFLAGS_aarch64_unknown_linux_musl: -I${{ env.ZIGLIB }}/libc/include/aarch64-linux-musl -I${{ env.ZIGLIB }}/libc/include/generic-musl
           CFLAGS_x86_64_unknown_linux_musl: -I${{ env.ZIGLIB }}/libc/include/x86_64-linux-musl -I${{ env.ZIGLIB }}/libc/include/generic-musl
