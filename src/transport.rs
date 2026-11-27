@@ -131,9 +131,17 @@ impl Transport for UsbTransport {
         let mut total = 0usize;
         let pkt = MAX_USB_BULK_BUFFER_SIZE;
         for chunk in data.chunks(pkt) {
-            match h.write_bulk(ep, chunk, Duration::from_secs(10)) {
-                Ok(n) => total += n,
-                Err(rusb::Error::Timeout) => continue,
+            let mut tries = 0;
+            loop {
+                match h.write_bulk(ep, chunk, Duration::from_secs(5)) {
+                    Ok(n) => { total += n; break; }
+                    Err(rusb::Error::Timeout) => {
+                        tries += 1;
+                        if tries >= 3 { return Ok(total); }
+                    }
+                    Err(e) => return Err(e.into()),
+                }
+            }
                 Err(e) => return Err(e.into()),
             }
         }
@@ -458,11 +466,24 @@ impl Transport for TermuxTransport {
     fn write(&mut self, data: &[u8]) -> Result<usize> {
         let h = self.handle.as_mut().ok_or_else(|| anyhow!("not connected"))?;
         let mut total = 0usize;
+        // Python parity (termux_usblib.py write): a failing chunk is retried
+        // at most 3 times, then the write is abandoned — an endless retry
+        // loop hammers usbfs and has been observed to reboot the phone.
         for chunk in data.chunks(MAX_USB_BULK_BUFFER_SIZE) {
-            match h.write_bulk(self.ep_out, chunk, Duration::from_secs(10)) {
-                Ok(n) => total += n,
-                Err(rusb::Error::Timeout) => continue,
-                Err(e) => return Err(e.into()),
+            let mut tries = 0;
+            loop {
+                match h.write_bulk(self.ep_out, chunk, Duration::from_secs(5)) {
+                    Ok(n) => {
+                        total += n;
+                        break;
+                    }
+                    Err(_) => {
+                        tries += 1;
+                        if tries >= 3 {
+                            return Ok(total);
+                        }
+                    }
+                }
             }
         }
         Ok(total)
