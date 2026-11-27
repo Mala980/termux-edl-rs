@@ -184,10 +184,11 @@ impl<'a> Firehose<'a> {
         println!("[firehose] TargetName={}", self.cfg.target_name);
         println!("[firehose] MemoryName={}", self.cfg.memory_name);
         println!("[firehose] Version={}", self.cfg.version);
-        // Read one sector as a sanity check.
+        // Sector-0 probe is informational only (python continues when it
+        // fails; the real GPT read below retries with skipresponse).
         let rsp = self.cmd_read_buffer(0, 1, 1, false)?;
         if !rsp.resp {
-            return Err(anyhow!("Failed to read sector 0 after configure (sector size mismatch? try --sectorsize)"));
+            eprintln!("[firehose] Warning: sector-0 probe failed, continuing");
         }
         Ok(())
     }
@@ -263,12 +264,19 @@ impl<'a> Firehose<'a> {
         );
         data += &self.nand_pages_attr();
         data += "/></data>";
-        let rsp = self.xmlsend(data.as_bytes(), self.skipresponse);
+        let mut rsp = self.xmlsend(data.as_bytes(), self.skipresponse);
         if !rsp.resp {
             if display {
                 eprintln!("[firehose:err] {}", rsp.error);
             }
-            return Ok(rsp);
+            // python get_gpt: on failure retry once with skipresponse=True
+            // (loader then emits raw data without expecting a response).
+            self.skipresponse = true;
+            rsp = self.xmlsend(data.as_bytes(), true);
+            self.skipresponse = false;
+            if !rsp.resp {
+                return Ok(rsp);
+            }
         }
         let bytestoread = self.cfg.sector_size as usize * num_partition_sectors as usize;
         let mut res_data = Vec::with_capacity(bytestoread);
