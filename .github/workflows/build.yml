@@ -156,7 +156,10 @@ jobs:
           for f in /tmp/arts/*.tar.gz; do tar xzf "$f" -C dist; done
       - name: Compress binaries
         run: cd dist && for f in edl-rs-*; do gzip -k "$f"; done
-      - uses: softprops/action-gh-release@v2
-        with:
-          files: dist/*
-          generate_release_notes: true
+      - name: Create GitHub release (gh CLI, no node actions)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          gh release create "$TAG" dist/* --repo ${{ github.repository }} --title "termux-edl-rs $TAG" --generate-notes || \
+            gh release upload "$TAG" dist/* --repo ${{ github.repository }} --clobber
