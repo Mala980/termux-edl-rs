@@ -124,7 +124,9 @@ impl<'a> Firehose<'a> {
     /// Send the configure command and negotiate payload sizes.
     pub fn configure(&mut self) -> Result<()> {
         if self.cfg.sector_size == 0 {
-            self.cfg.sector_size = if self.cfg.memory_name.eq_ignore_ascii_case("emmc") { 512 } else { 4096 };
+            self.cfg.sector_size = if self.cfg.memory_name.is_empty()
+                || self.cfg.memory_name.eq_ignore_ascii_case("emmc")
+            { 512 } else { 4096 };
         }
         let mut connectcmd = format!(
             "<?xml version=\"1.0\" encoding=\"UTF-8\" ?><data><configure MemoryName=\"{}\" Verbose=\"0\" \

@@ -290,6 +290,11 @@ fn run(args: Args) -> Result<()> {
     fh.debug = args.debugmode;
     if let Some(m) = &args.memory {
         fh.cfg.memory_name = m.clone();
+    } else {
+        fh.cfg.memory_name = "eMMC".into();
+    }
+    if let Some(s) = args.sectorsize {
+        fh.cfg.sector_size = s;
     }
     fh.cfg.skip_storage_init = args.skipstorageinit;
     fh.cfg.skip_write = args.skipwrite;
