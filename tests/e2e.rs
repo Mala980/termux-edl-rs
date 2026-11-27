@@ -163,3 +163,36 @@ fn e2e_firehose_xml_response_parse() {
         "firehose response must parse to value=ACK, got: {pairs:?}"
     );
 }
+
+#[test]
+fn e2e_loader_db_order_cyanogen_before_xiaomi() {
+    let dir = std::env::temp_dir().join("edl_loader_order_test");
+    let _ = std::fs::remove_dir_all(&dir);
+    for sub in ["cyanogen", "xiaomi"] {
+        std::fs::create_dir_all(dir.join("Loaders").join(sub)).unwrap();
+    }
+    std::fs::write(
+        dir.join("Loaders/cyanogen/007050e100000000_4614048173062ae4_fhprg_peek.bin"),
+        b"x",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("Loaders/xiaomi/007050e100000000_278448179ac756a1_fhprg_peek.bin"),
+        b"x",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("Loaders/xiaomi/007050e100000000_50838757eab7c632_fhprg_peek_wt88047.bin"),
+        b"x",
+    )
+    .unwrap();
+    let ldir = dir.join("Loaders").to_string_lossy().to_string();
+    let db = termux_edl_rs::loader_db::LoaderDb::scan(&ldir);
+    let hwid = "007050e100000000";
+    let loader = db.find_loader(hwid, Some("cc3153a80293939b"));
+    let p = loader.expect("loader must be found");
+    assert!(
+        p.contains("cyanogen"),
+        "first scanned loader (cyanogen) must win, got: {p}"
+    );
+}

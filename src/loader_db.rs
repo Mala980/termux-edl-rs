@@ -20,7 +20,9 @@ impl LoaderDb {
             for entry in entries {
                 let path = entry.path();
                 if path.is_dir() {
-                    stack.push(path);
+                    // BFS: append front so subdirs are processed in
+                    // alphabetical order, like os.walk (cyanogen before xiaomi).
+                    stack.insert(0, path);
                     continue;
                 }
                 let filename = entry.file_name().to_string_lossy().to_string();
