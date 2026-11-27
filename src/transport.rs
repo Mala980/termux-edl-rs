@@ -142,8 +142,6 @@ impl Transport for UsbTransport {
                     Err(e) => return Err(e.into()),
                 }
             }
-                Err(e) => return Err(e.into()),
-            }
         }
         Ok(total)
     }
