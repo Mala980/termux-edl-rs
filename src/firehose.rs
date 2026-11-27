@@ -301,12 +301,21 @@ impl<'a> Firehose<'a> {
             res_data.extend_from_slice(&tmp);
         }
         if self.debug {
-            eprintln!(
-                "[debug] read l{} p{} n{} -> {} bytes, head: {}",
-                physical_partition_number, start_sector, num_partition_sectors,
-                res_data.len(),
-                res_data.iter().take(24).map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ")
-            );
+            if res_data.starts_with(b"<?xml") {
+                eprintln!(
+                    "[debug] read l{} p{} n{} -> XML RESPONSE ({} bytes): {}",
+                    physical_partition_number, start_sector, num_partition_sectors,
+                    res_data.len(),
+                    String::from_utf8_lossy(&res_data)
+                );
+            } else {
+                eprintln!(
+                    "[debug] read l{} p{} n{} -> {} bytes RAW, head: {}",
+                    physical_partition_number, start_sector, num_partition_sectors,
+                    res_data.len(),
+                    res_data.iter().take(24).map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ")
+                );
+            }
         }
         let wd = self.wait_for_data();
         let log = xmlparser::getlog(&wd);
@@ -487,9 +496,9 @@ impl<'a> Firehose<'a> {
             return Ok(None);
         }
         let mut guid_gpt = crate::gpt::Gpt::new();
-        if self.debug {
+        if self.debug && data.len() > ss as usize {
             eprintln!(
-                "[debug] gpt total {} bytes, hdr32@ss: {}",
+                "[debug] gpt total {} bytes, hdr16@ss: {}",
                 data.len(),
                 data[ss as usize..(ss as usize + 16).min(data.len())]
                     .iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ")
