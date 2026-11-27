@@ -196,3 +196,58 @@ fn e2e_loader_db_order_cyanogen_before_xiaomi() {
         "first scanned loader (cyanogen) must win, got: {p}"
     );
 }
+
+
+struct MockFirehose {
+    queue: std::collections::VecDeque<Vec<u8>>,
+    last_cmd: String,
+}
+
+impl Transport for MockFirehose {
+    fn connect(&mut self, _v: u16, _p: u16) -> anyhow::Result<()> { Ok(()) }
+    fn close(&mut self) {}
+    fn write(&mut self, data: &[u8]) -> anyhow::Result<usize> {
+        self.last_cmd = String::from_utf8_lossy(data).to_string();
+        // Extract requested payload size.
+        let req: u32 = self.last_cmd
+            .split("MaxPayloadSizeToTargetInBytes=\"")
+            .nth(1)
+            .and_then(|s| s.split('"').next())
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        let mut q = std::collections::VecDeque::new();
+        std::mem::swap(&mut q, &mut self.queue);
+        self.queue = q;
+        if self.last_cmd.contains("<configure") && req > 8192 {
+            self.queue.push_back(
+                b"<?xml version=\"1.0\"?><data><log value=\"Host's payload to target size is too large logbuf@0x1 fh@0x2\"/></data>".to_vec(),
+            );
+        } else if self.last_cmd.contains("<read") {
+            self.queue.push_back(vec![0u8; 512]); // raw sector data first
+            self.queue.push_back(
+                b"<?xml version=\"1.0\"?><data><response value=\"ACK\"/></data>".to_vec(),
+            );
+        } else {
+            self.queue.push_back(
+                b"<?xml version=\"1.0\"?><data><response value=\"ACK\" MemoryName=\"eMMC\" MaxPayloadSizeToTargetInBytes=\"8192\" Version=\"1\" TargetName=\"8953\"/></data>".to_vec(),
+            );
+        }
+        Ok(data.len())
+    }
+    fn read(&mut self, _n: usize, _t: u32) -> anyhow::Result<Vec<u8>> {
+        Ok(self.queue.pop_front().unwrap_or_default())
+    }
+    fn max_packet(&self) -> usize { 512 }
+}
+
+#[test]
+fn e2e_firehose_configure_nak_retries_to_8192() {
+    let mut dev = MockFirehose { queue: Default::default(), last_cmd: String::new() };
+    let mut fh = termux_edl_rs::firehose::Firehose::new(&mut dev);
+    fh.configure().expect("configure must eventually ACK at 8192");
+    assert!(
+        fh.cfg.max_payload_size_to_target <= 8192,
+        "payload must shrink to <= 8192, got {}",
+        fh.cfg.max_payload_size_to_target
+    );
+}

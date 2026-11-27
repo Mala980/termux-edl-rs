@@ -167,6 +167,17 @@ impl<'a> Firehose<'a> {
             connectcmd2 += "/></data>";
             let rsp2 = self.xmlsend(connectcmd2.as_bytes(), false);
             if !rsp2.resp {
+                if rsp2.error.contains("Not support configure MemoryName eMMC") {
+                    println!("[firehose] eMMC not supported by this loader — trying UFS");
+                    self.cfg.memory_name = "UFS".into();
+                    return self.configure();
+                }
+                if rsp2.error.contains("payload to target size is too large")
+                    && self.cfg.max_payload_size_to_target > 8192
+                {
+                    self.cfg.max_payload_size_to_target /= 2;
+                    return self.configure();
+                }
                 return Err(anyhow!("configure failed: {}", rsp2.error));
             }
         }
@@ -275,7 +286,9 @@ impl<'a> Firehose<'a> {
         let log = xmlparser::getlog(&wd);
         let attrs = xmlparser::getresponse(&wd);
         let value = attr(&attrs, "value").unwrap_or("");
-        if value == "ACK" {
+        // Python only fails when an explicit NAK ("value" != ACK) arrives;
+        // an absent response (data already consumed) is success.
+        if value.is_empty() || value == "ACK" {
             Ok(FirehoseResponse { resp: true, data: res_data, attrs, log, error: String::new() })
         } else {
             Ok(FirehoseResponse { resp: false, data: res_data, attrs, error: log.join("\n"), log })
