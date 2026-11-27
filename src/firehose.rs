@@ -199,7 +199,11 @@ impl<'a> Firehose<'a> {
     pub fn wait_for_data(&mut self) -> Vec<u8> {
         let mut tmp = Vec::new();
         let mut empties = 0;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         while find_sub(&tmp, b"response value").is_none() {
+            if std::time::Instant::now() > deadline {
+                break;
+            }
             let res = self.cdc.read(0x10000, 1000).unwrap_or_default();
             if res.is_empty() {
                 empties += 1;
@@ -220,7 +224,11 @@ impl<'a> Firehose<'a> {
         let rsp = self.xmlsend(data, false);
         let mut info = Vec::new();
         let mut tmp = Vec::new();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
+            if std::time::Instant::now() > deadline {
+                break;
+            }
             let chunk = self.cdc.read(0x10000, 500).unwrap_or_default();
             if chunk.is_empty() {
                 break;
@@ -340,11 +348,58 @@ impl<'a> Firehose<'a> {
         filename: &str,
         display: bool,
     ) -> Result<bool> {
-        let rsp = self.cmd_read_buffer(physical_partition_number, start_sector, num_partition_sectors, display)?;
+        // Streaming variant of python cmd_read: send the <read> command,
+        // write raw bytes to disk AS THEY ARRIVE (no giant RAM buffer), then
+        // wait for the final ACK. Bounded by an overall deadline so a dead
+        // device can never spin the loop (and the USB stack) indefinitely.
+        let mut data = format!(
+            "<?xml version=\"1.0\" ?><data><read SECTOR_SIZE_IN_BYTES=\"{}\" num_partition_sectors=\"{}\" \
+             physical_partition_number=\"{}\" start_sector=\"{}\"",
+            self.cfg.sector_size, num_partition_sectors, physical_partition_number, start_sector
+        );
+        data += &self.nand_pages_attr();
+        data += "/>\n</data>";
+        let rsp = self.xmlsend(data.as_bytes(), self.skipresponse);
         if !rsp.resp {
+            eprintln!("[firehose:err] {}", rsp.error);
             return Ok(false);
         }
-        std::fs::write(filename, &rsp.data)?;
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        let mut f = std::io::BufWriter::new(std::fs::File::create(filename)?);
+        let bytestoread = self.cfg.sector_size as usize * num_partition_sectors as usize;
+        let total = bytestoread;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(600);
+        let mut got = 0usize;
+        while got < bytestoread {
+            if std::time::Instant::now() > deadline {
+                eprintln!("[firehose:err] Read timed out after {} bytes", got);
+                return Ok(false);
+            }
+            let want = (bytestoread - got).min(0x100000);
+            let tmp = self.cdc.read(want, 5000).unwrap_or_default();
+            if tmp.is_empty() {
+                eprintln!("[firehose:err] USB read stalled at {}/{} bytes", got, total);
+                return Ok(false);
+            }
+            got += tmp.len();
+            std::io::Write::write_all(&mut f, &tmp)?;
+            if display {
+                show_progress("Read", got, total);
+            }
+        }
+        std::io::Write::flush(&mut f)?;
+        drop(f);
+        let wd = self.wait_for_data();
+        let log = xmlparser::getlog(&wd);
+        let attrs = xmlparser::getresponse(&wd);
+        let value = attr(&attrs, "value").unwrap_or("");
+        if value != "ACK" {
+            eprintln!("[firehose:err] Read failed:");
+            for line in &log {
+                eprintln!("  {line}");
+            }
+            return Ok(false);
+        }
         Ok(true)
     }
 

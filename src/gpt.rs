@@ -146,8 +146,11 @@ impl Gpt {
     }
 
     pub fn tostring(&self) -> String {
-        let mut mstr = "\nGPT Table:\n-------------\n".to_string();
-        for (partitionname, partition) in &self.partentries {
+     let mut mstr = "\nGPT Table:\n-------------\n".to_string();
+     // Python prints partitions sorted by offset.
+     let mut sorted: Vec<(&String, &PartitionEntry)> = self.partentries.iter().collect();
+     sorted.sort_by_key(|(_, p)| p.sector);
+     for (partitionname, partition) in sorted {
             let active = ((partition.flags >> (AB_FLAG_OFFSET * 8)) & 0xFF) & AB_PARTITION_ATTR_SLOT_ACTIVE
                 == AB_PARTITION_ATTR_SLOT_ACTIVE;
             mstr += &format!(
