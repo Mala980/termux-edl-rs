@@ -64,6 +64,30 @@ impl<'a> Firehose<'a> {
         Self { cdc, cfg: FirehoseConfig::default(), supported_functions: Vec::new(), skipresponse: false }
     }
 
+    /// Drain pending loader boot output before the first command, exactly like
+    /// python firehose.connect(): read until an empty read or a complete
+    /// <response ...></data> is seen; collect LOG lines meanwhile.
+    pub fn connect(&mut self) {
+        let mut info: Vec<String> = Vec::new();
+        loop {
+            let v = self.cdc.read(0x10000, 50).unwrap_or_default();
+            if v.is_empty() {
+                break;
+            }
+            if v.windows(9).any(|w| w == b"</data>") {
+                info.extend(xmlparser::getlog(&v));
+                break;
+            }
+            info.extend(xmlparser::getlog(&v));
+        }
+        for line in &info {
+            println!("[firehose] {line}");
+            if line.to_lowercase().contains("supported functions") {
+                self.supported_functions.push(line.clone());
+            }
+        }
+    }
+
     fn read_until_response(&mut self, timeout_ms: u32) -> Vec<u8> {
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms.max(1) as u64);
         let mut rdata = Vec::new();
