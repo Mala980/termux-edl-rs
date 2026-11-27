@@ -439,7 +439,9 @@ impl Transport for TermuxTransport {
         self.discover_endpoint_defaults(vid, pid);
         // Claim interface if possible (non-fatal, like python).
         if let Some(h) = &mut self.handle {
-            let _ = h.set_auto_detach_kernel_driver(true);
+            // NOTE: no set_auto_detach_kernel_driver here — python's termux
+            // backend never calls it, and on Android the DISCONNECT_CLAIMS
+            // ioctl has been observed to destabilize usbfs (host reboots).
             let _ = h.claim_interface(0);
         }
         Ok(())
@@ -471,7 +473,8 @@ impl Transport for TermuxTransport {
         let mut res = Vec::with_capacity(resplen);
         let timeout = Duration::from_millis(timeout_ms.max(1) as u64);
         while res.len() < resplen {
-            let want = (resplen - res.len()).min(self.maxsize.max(512));
+            // 16 KB per transfer, same as python usbread (bufsize=min(resplen,16384)).
+            let want = (resplen - res.len()).min(16384);
             let mut buf = vec![0u8; want];
             match h.read_bulk(self.ep_in, &mut buf, timeout) {
                 Ok(0) => break,
