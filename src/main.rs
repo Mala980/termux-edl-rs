@@ -287,6 +287,7 @@ fn run(args: Args) -> Result<()> {
     let mut fh = firehose::Firehose::new(t.as_mut());
     fh.connect(); // drain loader boot log (python firehose.connect())
     fh.skipresponse = args.skipresponse;
+    fh.debug = args.debugmode;
     if let Some(m) = &args.memory {
         fh.cfg.memory_name = m.clone();
     }

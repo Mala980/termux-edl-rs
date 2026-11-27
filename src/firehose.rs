@@ -53,6 +53,7 @@ pub struct Firehose<'a> {
     pub cfg: FirehoseConfig,
     pub supported_functions: Vec<String>,
     pub skipresponse: bool,
+    pub debug: bool,
 }
 
 fn attr<'r>(attrs: &'r [(String, String)], key: &str) -> Option<&'r str> {
@@ -61,7 +62,7 @@ fn attr<'r>(attrs: &'r [(String, String)], key: &str) -> Option<&'r str> {
 
 impl<'a> Firehose<'a> {
     pub fn new(cdc: &'a mut dyn Transport) -> Self {
-        Self { cdc, cfg: FirehoseConfig::default(), supported_functions: Vec::new(), skipresponse: false }
+        Self { cdc, cfg: FirehoseConfig::default(), supported_functions: Vec::new(), skipresponse: false, debug: false }
     }
 
     /// Drain pending loader boot output before the first command, exactly like
@@ -299,6 +300,14 @@ impl<'a> Firehose<'a> {
             remaining -= tmp.len();
             res_data.extend_from_slice(&tmp);
         }
+        if self.debug {
+            eprintln!(
+                "[debug] read l{} p{} n{} -> {} bytes, head: {}",
+                physical_partition_number, start_sector, num_partition_sectors,
+                res_data.len(),
+                res_data.iter().take(24).map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ")
+            );
+        }
         let wd = self.wait_for_data();
         let log = xmlparser::getlog(&wd);
         let attrs = xmlparser::getresponse(&wd);
@@ -478,6 +487,14 @@ impl<'a> Firehose<'a> {
             return Ok(None);
         }
         let mut guid_gpt = crate::gpt::Gpt::new();
+        if self.debug {
+            eprintln!(
+                "[debug] gpt total {} bytes, hdr32@ss: {}",
+                data.len(),
+                data[ss as usize..(ss as usize + 16).min(data.len())]
+                    .iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ")
+            );
+        }
         if let Some(hdr) = crate::gpt::Gpt::parseheader(&data, ss as usize) {
             if hdr.num_part_entries > 0 && hdr.part_entry_size > 0 {
                 let part_table_size = hdr.num_part_entries as u64 * hdr.part_entry_size as u64;
