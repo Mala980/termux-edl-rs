@@ -5,17 +5,19 @@ use std::collections::HashMap;
 
 #[derive(Default)]
 pub struct LoaderDb {
-    pub db: HashMap<String, HashMap<String, String>>, // hwid -> pkhash -> path
+    pub db: HashMap<String, Vec<(String, String)>>, // hwid -> ordered (pkhash, path)
 }
 
 impl LoaderDb {
     pub fn scan(dir: &str) -> Self {
-        let mut db: HashMap<String, HashMap<String, String>> = HashMap::new();
+        let mut db: HashMap<String, Vec<(String, String)>> = HashMap::new();
         // Recursive walk like os.walk in loader_db.py (Loaders/<vendor>/<file>).
         let mut stack = vec![std::path::PathBuf::from(dir)];
         while let Some(d) = stack.pop() {
             let Ok(rd) = std::fs::read_dir(&d) else { continue };
-            for entry in rd.flatten() {
+            let mut entries: Vec<_> = rd.flatten().collect();
+            entries.sort_by_key(|e| e.file_name());
+            for entry in entries {
                 let path = entry.path();
                 if path.is_dir() {
                     stack.push(path);
@@ -40,10 +42,10 @@ impl LoaderDb {
             let pkhash = parts[1].to_lowercase();
             for m in convert_msmid(&hwid[..8]) {
                 let mhwid = format!("{m}{devid}");
-                db.entry(mhwid)
-                    .or_default()
-                    .entry(pkhash.clone())
-                    .or_insert(entry.path().to_string_lossy().to_string());
+                let list = db.entry(mhwid).or_default();
+                if !list.iter().any(|(k, _)| *k == pkhash) {
+                    list.push((pkhash.clone(), entry.path().to_string_lossy().to_string()));
+                }
             }
         }
         }
@@ -52,24 +54,23 @@ impl LoaderDb {
 
     /// Find a loader by HWID string (16 hex chars) and optional PK hash prefix.
     pub fn find_loader(&self, hwidstr: &str, pkhash: Option<&str>) -> Option<String> {
-        if let Some(mt) = self.db.get(hwidstr) {
-            if let Some(pk) = pkhash {
-                if let Some(p) = mt.get(&pk[..pk.len().min(16)]) {
+        // Ordered like python: first scanned loader wins (cyanogen before xiaomi).
+        let lookup = |mt: &[(String, String)], pk: Option<&str>| -> Option<String> {
+            if let Some(pk) = pk {
+                if let Some((_, p)) = mt.iter().find(|(k, _)| k.starts_with(&pk[..pk.len().min(16)])) {
                     return Some(p.clone());
                 }
             }
-            return mt.values().next().cloned();
+            mt.first().map(|(_, p)| p.clone())
+        };
+        if let Some(mt) = self.db.get(hwidstr) {
+            return lookup(mt, pkhash);
         }
         // Match by msm id prefix only.
         let msmid = &hwidstr[..8];
         for (h, mt) in &self.db {
             if &h[..8] == msmid {
-                if let Some(pk) = pkhash {
-                    if let Some(p) = mt.get(&pk[..pk.len().min(16)]) {
-                        return Some(p.clone());
-                    }
-                }
-                return mt.values().next().cloned();
+                return lookup(mt, pkhash);
             }
         }
         None
