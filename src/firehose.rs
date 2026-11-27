@@ -280,7 +280,16 @@ impl<'a> Firehose<'a> {
         }
         let bytestoread = self.cfg.sector_size as usize * num_partition_sectors as usize;
         let mut res_data = Vec::with_capacity(bytestoread);
-        let mut remaining = bytestoread;
+        // read_until_response may have already pulled RAW sector bytes into
+        // rsp.data before the ACK — keep only the raw part (strip "<?xml...).
+        {
+            let raw = match find_sub(&rsp.data, b"<?xml") {
+                Some(idx) => &rsp.data[..idx],
+                None => &rsp.data[..],
+            };
+            res_data.extend_from_slice(raw);
+        }
+        let mut remaining = bytestoread.saturating_sub(res_data.len());
         while remaining > 0 {
             let want = remaining.min(0x100000);
             let tmp = self.cdc.read(want, 5000).unwrap_or_default();
