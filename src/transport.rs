@@ -498,6 +498,12 @@ impl Transport for TermuxTransport {
                 Ok(0) => break,
                 Ok(n) => {
                     res.extend_from_slice(&buf[..n]);
+                    // Gentle pacing: brief breather per transfer keeps the
+                    // Android usb host stack from being hammered (random
+                    // kernel-panic reboots observed without it).
+                    if n >= 512 {
+                        std::thread::sleep(std::time::Duration::from_millis(2));
+                    }
                     if n < want { break; }
                 }
                 Err(rusb::Error::Timeout) => return Ok(res),
