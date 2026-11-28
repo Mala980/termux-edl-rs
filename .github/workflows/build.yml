@@ -106,6 +106,34 @@ jobs:
           linker = "$BIN/${TRIPLE}${API}-clang"
           ar = "$BIN/llvm-ar"
           EOF
+      - name: Build libusb shared for Android (runtime links Termux libusb)
+        if: matrix.ndk
+        run: |
+          sudo apt-get update -y >/dev/null 2>&1 && sudo apt-get install -y autoconf automake libtool pkg-config >/dev/null 2>&1 || true
+          git clone --depth 1 --branch v1.0.27 https://github.com/libusb/libusb.git /tmp/libusb-src
+          cd /tmp/libusb-src
+          if [ "${{ matrix.target }}" = "aarch64-linux-android" ]; then HOST=aarch64-linux-android; else HOST=armv7a-linux-androideabi; fi
+          NDK="${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64"
+          mkdir -p /tmp/libusb-inst/lib /tmp/libusb-inst/include/libusb-1.0
+          autoreconf -fi >/dev/null 2>&1 || ./bootstrap.sh
+          CC="$NDK/bin/${HOST}24-clang" \
+          ./configure --host=$HOST --disable-udev --enable-shared --disable-static \
+            --prefix=/tmp/libusb-inst >/dev/null
+          make -j2 >/dev/null
+          make install >/dev/null
+          cp /tmp/libusb-src/libusb/libusb.h /tmp/libusb-inst/include/libusb-1.0/
+          # pkg-config file so libusb1-sys links dynamically instead of vendored
+          cat > /tmp/libusb-inst/lib/pkgconfig/libusb-1.0.pc <<'EOF'
+          prefix=/tmp/libusb-inst
+          Name: libusb-1.0
+          Description: libusb-1.0 (android cross build)
+          Version: 1.0.27
+          Libs: -L${prefix}/lib -lusb-1.0
+          Cflags: -I${prefix}/include/libusb-1.0
+          EOF
+          echo "PKG_CONFIG_PATH=/tmp/libusb-inst/lib/pkgconfig" >> $GITHUB_ENV
+          echo "PKG_CONFIG_ALLOW_CROSS=1" >> $GITHUB_ENV
+          echo "LIBUSB_INST=/tmp/libusb-inst" >> $GITHUB_ENV
       - name: Build release
         env:
           CC_aarch64_linux_android: aarch64-linux-android-clang
