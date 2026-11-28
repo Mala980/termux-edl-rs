@@ -389,7 +389,21 @@ impl<'a> Firehose<'a> {
                  physical_partition_number=\"{}\" start_sector=\"{}\"/>\n</data>",
                 self.cfg.sector_size, n_sectors, physical_partition_number, start
             );
-            let rsp = self.xmlsend(cmd.as_bytes(), self.skipresponse);
+            let mut rsp = self.xmlsend(cmd.as_bytes(), self.skipresponse);
+            if !rsp.resp {
+                if self.debug {
+                    eprintln!(
+                        "[debug] chunk read p{} s{} n{} got no ACK ({} bytes buffered): {}",
+                        physical_partition_number, start, n_sectors, rsp.data.len(),
+                        String::from_utf8_lossy(&rsp.data[..rsp.data.len().min(400)])
+                    );
+                }
+                // Old MSM8916 loader: retry once with skipresponse (python
+                // get_gpt parity) — it then streams raw data w/o response.
+                self.skipresponse = true;
+                rsp = self.xmlsend(cmd.as_bytes(), true);
+                self.skipresponse = false;
+            }
             if !rsp.resp {
                 eprintln!("[firehose:err] {}", rsp.error);
                 return Ok(false);
