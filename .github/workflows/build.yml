@@ -150,6 +150,7 @@ jobs:
           CC_aarch64_unknown_linux_musl: ${{ env.WRAPPER_DIR }}/aarch64-unknown-linux-musl-cc
           CC_x86_64_unknown_linux_musl: ${{ env.WRAPPER_DIR }}/x86_64-unknown-linux-musl-cc
         run: |
+          export RUSTFLAGS="-C link-arg=-Wl,-rpath,/data/data/com.termux/files/usr/lib"
           if [ "${{ contains(matrix.target, 'musl') }}" = "true" ] || [ -n "${{ matrix.gnu_cross }}" ]; then
             cargo zigbuild --release --target ${{ matrix.target }}
           else
