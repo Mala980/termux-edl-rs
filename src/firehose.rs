@@ -369,37 +369,68 @@ impl<'a> Firehose<'a> {
         let bytestoread = self.cfg.sector_size as usize * num_partition_sectors as usize;
         let total = bytestoread;
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(600);
+        // Split big reads into 1 MB <read> commands, each with its own ACK.
+        // One giant read of tens of MB floods the phone's usbfs and has been
+        // observed to reboot it; small commands keep the loader's queue sane.
+        let chunk_bytes: usize = 0x100000;
+        let ss = self.cfg.sector_size as u64;
+        let sectors_per_chunk = (chunk_bytes as u64 / ss).max(1);
+        let mut start = start_sector;
+        let mut remaining_sectors = num_partition_sectors;
         let mut got = 0usize;
-        while got < bytestoread {
+        while remaining_sectors > 0 {
             if std::time::Instant::now() > deadline {
                 eprintln!("[firehose:err] Read timed out after {} bytes", got);
                 return Ok(false);
             }
-            let want = (bytestoread - got).min(0x100000);
-            let tmp = self.cdc.read(want, 5000).unwrap_or_default();
-            if tmp.is_empty() {
-                eprintln!("[firehose:err] USB read stalled at {}/{} bytes", got, total);
+            let n_sectors = remaining_sectors.min(sectors_per_chunk);
+            let cmd = format!(
+                "<?xml version=\"1.0\" ?><data><read SECTOR_SIZE_IN_BYTES=\"{}\" num_partition_sectors=\"{}\" \
+                 physical_partition_number=\"{}\" start_sector=\"{}\"/>\n</data>",
+                self.cfg.sector_size, n_sectors, physical_partition_number, start
+            );
+            let rsp = self.xmlsend(cmd.as_bytes(), self.skipresponse);
+            if !rsp.resp {
+                eprintln!("[firehose:err] {}", rsp.error);
                 return Ok(false);
             }
-            got += tmp.len();
-            std::io::Write::write_all(&mut f, &tmp)?;
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            let want = ss as usize * n_sectors as usize;
+            let mut chunk_got = 0usize;
+            while chunk_got < want {
+                if std::time::Instant::now() > deadline {
+                    eprintln!("[firehose:err] Read timed out after {} bytes", got);
+                    return Ok(false);
+                }
+                let tmp = self.cdc.read(want - chunk_got, 5000).unwrap_or_default();
+                if tmp.is_empty() {
+                    eprintln!("[firehose:err] USB read stalled at {}/{} bytes", got, total);
+                    return Ok(false);
+                }
+                chunk_got += tmp.len();
+                got += tmp.len();
+                std::io::Write::write_all(&mut f, &tmp)?;
+            }
             if display {
                 show_progress("Read", got, total);
             }
+            // Wait for this chunk's final ACK so the wire stays in sync.
+            let wd = self.wait_for_data();
+            let attrs = xmlparser::getresponse(&wd);
+            let value = attr(&attrs, "value").unwrap_or("");
+            if value == "NAK" {
+                let log = xmlparser::getlog(&wd);
+                eprintln!("[firehose:err] Read failed at sector {start}:");
+                for line in &log {
+                    eprintln!("  {line}");
+                }
+                return Ok(false);
+            }
+            start += n_sectors;
+            remaining_sectors -= n_sectors;
         }
         std::io::Write::flush(&mut f)?;
         drop(f);
-        let wd = self.wait_for_data();
-        let log = xmlparser::getlog(&wd);
-        let attrs = xmlparser::getresponse(&wd);
-        let value = attr(&attrs, "value").unwrap_or("");
-        if value != "ACK" {
-            eprintln!("[firehose:err] Read failed:");
-            for line in &log {
-                eprintln!("  {line}");
-            }
-            return Ok(false);
-        }
         Ok(true)
     }
 
