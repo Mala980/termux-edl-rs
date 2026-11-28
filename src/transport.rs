@@ -463,9 +463,16 @@ impl Transport for TermuxTransport {
     fn write(&mut self, data: &[u8]) -> Result<usize> {
         let h = self.handle.as_mut().ok_or_else(|| anyhow!("not connected"))?;
         let mut total = 0usize;
+        // Zero-length transfer (ZLP) — python's write(b'') issues an actual
+        // 0-length bulk transfer; chunks() on an empty slice would skip it.
+        if data.is_empty() {
+            match h.write_bulk(self.ep_out, &[], Duration::from_secs(1)) {
+                Ok(_) => return Ok(0),
+                Err(_) => return Ok(0),
+            }
+        }
         // Python parity (termux_usblib.py write): a failing chunk is retried
-        // at most 3 times, then the write is abandoned — an endless retry
-        // loop hammers usbfs and has been observed to reboot the phone.
+        // at most 3 times, then the write is abandoned.
         for chunk in data.chunks(MAX_USB_BULK_BUFFER_SIZE) {
             let mut tries = 0;
             loop {
