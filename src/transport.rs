@@ -436,6 +436,29 @@ unsafe fn receive_fd(sock_fd: i32) -> Result<i32> {
     anyhow::bail!("SCM_RIGHTS not found in control message");
 }
 
+// Wire-level transfer logger: if EDL_LOGFILE is set, every bulk transfer is
+// appended there. Survives a kernel panic/reboot — send the tail back.
+use std::sync::Mutex;
+static WIRE_LOG: Mutex<Option<std::fs::File>> = Mutex::new(None);
+static WIRE_START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+
+pub fn wire_log(dir: &str, len: usize, res: &str) {
+    if let Ok(mut g) = WIRE_LOG.lock() {
+        if g.is_none() {
+            let path = match std::env::var("EDL_LOGFILE") {
+                Ok(p) if !p.is_empty() => p,
+                _ => return,
+            };
+            *g = std::fs::OpenOptions::new().create(true).append(true).open(path).ok();
+        }
+        if let Some(f) = g.as_mut() {
+            let start = WIRE_START.get_or_init(std::time::Instant::now);
+            use std::io::Write;
+            let _ = writeln!(f, "{:?} {} {} {}", start.elapsed(), dir, len, res);
+        }
+    }
+}
+
 impl Transport for TermuxTransport {
     fn connect(&mut self, vid: u16, pid: u16) -> Result<()> {
         // Discover endpoints for the already-opened handle.
@@ -466,10 +489,10 @@ impl Transport for TermuxTransport {
         // Zero-length transfer (ZLP) — python's write(b'') issues an actual
         // 0-length bulk transfer; chunks() on an empty slice would skip it.
         if data.is_empty() {
-            match h.write_bulk(self.ep_out, &[], Duration::from_secs(1)) {
-                Ok(_) => return Ok(0),
-                Err(_) => return Ok(0),
-            }
+            let r = h.write_bulk(self.ep_out, &[], Duration::from_secs(1));
+            wire_log("ZLP", 0, &format!("{:?}", r.as_ref().err()));
+            let _ = r;
+            return Ok(0);
         }
         // Python parity (termux_usblib.py write): a failing chunk is retried
         // at most 3 times, then the write is abandoned.
@@ -478,10 +501,12 @@ impl Transport for TermuxTransport {
             loop {
                 match h.write_bulk(self.ep_out, chunk, Duration::from_secs(5)) {
                     Ok(n) => {
+                        wire_log("WR", n, "");
                         total += n;
                         break;
                     }
-                    Err(_) => {
+                    Err(e) => {
+                        wire_log("WR-ERR", chunk.len(), &format!("{e:?}"));
                         tries += 1;
                         if tries >= 3 {
                             return Ok(total);
@@ -502,8 +527,12 @@ impl Transport for TermuxTransport {
             let want = (resplen - res.len()).min(16384);
             let mut buf = vec![0u8; want];
             match h.read_bulk(self.ep_in, &mut buf, timeout) {
-                Ok(0) => break,
+                Ok(0) => {
+                    wire_log("RD", want, "eof");
+                    break;
+                }
                 Ok(n) => {
+                    wire_log("RD", n, "");
                     res.extend_from_slice(&buf[..n]);
                     // Gentle pacing: brief breather per transfer keeps the
                     // Android usb host stack from being hammered (random
@@ -513,8 +542,12 @@ impl Transport for TermuxTransport {
                     }
                     if n < want { break; }
                 }
-                Err(rusb::Error::Timeout) => return Ok(res),
+                Err(rusb::Error::Timeout) => {
+                    wire_log("RD-TMO", want, "");
+                    return Ok(res)
+                }
                 Err(e) => {
+                    wire_log("RD-ERR", want, &format!("{e:?}"));
                     if res.is_empty() { return Err(e.into()); }
                     return Ok(res);
                 }
