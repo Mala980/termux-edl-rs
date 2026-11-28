@@ -424,6 +424,11 @@ impl<'a> Firehose<'a> {
                 chunk_got += tmp.len();
                 got += tmp.len();
                 std::io::Write::write_all(&mut f, &tmp)?;
+                // Pace the bus: a short breather every 256 KB keeps the
+                // phone's usbfs from being saturated for minutes on end.
+                if got % 0x40000 < 0x10000 {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
             }
             if display {
                 show_progress("Read", got, total);

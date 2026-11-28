@@ -443,11 +443,10 @@ impl Transport for TermuxTransport {
             anyhow::bail!("Termux transport not opened");
         }
         self.discover_endpoint_defaults(vid, pid);
-        // Claim interface if possible (non-fatal, like python).
+        // Claim interface if possible (non-fatal, like python). Python's
+        // termux backend detaches a kernel driver only if one is ACTIVE
+        // before claiming; never use the blanket auto-detach ioctl.
         if let Some(h) = &mut self.handle {
-            // NOTE: no set_auto_detach_kernel_driver here — python's termux
-            // backend never calls it, and on Android the DISCONNECT_CLAIMS
-            // ioctl has been observed to destabilize usbfs (host reboots).
             let _ = h.claim_interface(0);
         }
         Ok(())
